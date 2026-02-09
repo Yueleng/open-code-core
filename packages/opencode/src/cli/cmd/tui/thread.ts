@@ -45,6 +45,22 @@ function createEventSource(client: RpcClient): EventSource {
 }
 
 /**
+ * Opencode Initialization Workflow
+ *
+ * opencode (user runs command)
+ *    ↓
+ * index.ts: cli.parse()
+ *    ↓
+ * TuiThreadCommand (thread.ts) - matched via "$0" default command
+ *    ↓
+ * handler() - spawns worker, sets up RPC
+ *    ↓
+ * tui() (app.tsx) - renders the UI with render()
+ *    ↓
+ * App() component - interactive session/conversation loop
+ */
+
+/**
  * ┌─────────────────────┐          RPC           ┌─────────────────────┐
  * │   Main Process      │ ◄───────────────────►  │   Worker Process    │
  * │   (thread.ts)       │                        │   (worker.ts)       │
