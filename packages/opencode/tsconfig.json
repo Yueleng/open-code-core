@@ -1,12 +1,46 @@
 {
+  // This provides IDE autocompletion and validation for the tsconfig.json file.
+  // It tells your editor where to find the JSON schema definition.
   "$schema": "https://json.schemastore.org/tsconfig",
+  // This inherits settings from the Bun-specific TypeScript preset. 
+  // This preset includes sensible defaults for Bun projects 
+  // (e.g., module: "preserve", moduleResolution: "bundler", strict mode settings, etc.). 
+  // This keeps the local config clean by only overriding what's necessary.
   "extends": "@tsconfig/bun/tsconfig.json",
   "compilerOptions": {
+    // Keeps JSX syntax as-is in the output (rather than transforming it to React.createElement). 
+    // Useful when another tool (like Bun or a bundler) handles the JSX transformation.
+    // This is necessary for SolidJS, which uses JSX syntax.
     "jsx": "preserve",
+    // Specifies the library for JSX automatic runtime. 
+    // This tells TypeScript to use Solid.js-style JSX from the @opentui/solid package 
+    // (a TUI/terminal UI library).
     "jsxImportSource": "@opentui/solid",
+    // Specifies the libraries to include in the TypeScript compiler. 
+    // ESNext: Includes the latest ECMAScript features.
+    // DOM: Includes the DOM APIs for browser environments.
+    // DOM.Iterable: Includes iterable DOM APIs.
+    // Useful even in a CLI tool if you're using web-like APIs (e.g., fetch, TextEncoder).
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    // Explicitly sets an empty array, which prevents TypeScript from auto-including @types/* packages from node_modules. 
+    // Only explicitly imported types will be used.
     "types": [],
+    // When enabled, TypeScript will issue an error if you try to access a property on a value that might be undefined or null.
+    // Disables the strict check that makes indexed accesses (like arr[0]) return `T | undefined`.
     "noUncheckedIndexedAccess": false,
+    // Custom conditional types that can be used in conditional type constraints.
+    // So if a dependency has both "browser" and "default" exports, 
+    // TypeScript will now prefer and resolve types from the "browser" entry.
+    // {
+    //   "exports": {
+    //     ".": {
+    //       "browser": { "types": "./browser.d.ts", "default": "./browser.js" },
+    //       "default": { "types": "./node.d.ts", "default": "./node.js" }
+    //     }
+    //   }
+    // }
+    // Without customConditions	TypeScript will resolve types from the "default" entry: node.d.ts
+    // With customConditions	TypeScript will resolve types from the "browser" entry: browser.d.ts
     "customConditions": ["browser"],
     "paths": {
       "@/*": ["./src/*"],
