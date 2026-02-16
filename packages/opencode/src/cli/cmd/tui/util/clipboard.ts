@@ -1,3 +1,9 @@
+/**
+ * Clipboard Implementation
+ *
+ * Provides a cross-platform system for reading/writing text and images,
+ * with native support for macOS, Linux, and Windows, plus OSC 52 for SSH.
+ */
 import { $ } from "bun"
 import { platform, release } from "os"
 import clipboardy from "clipboardy"
@@ -25,9 +31,15 @@ export namespace Clipboard {
     mime: string
   }
 
+  /**
+   * Reads the clipboard content, prioritizing images over text.
+   * Leverages OS-specific CLI tools to extract binary image data.
+   */
   export async function read(): Promise<Content | undefined> {
     const os = platform()
 
+    // macOS: Use AppleScript to extract PNG data from clipboard to a temp file,
+    // then read it into a Base64 string.
     if (os === "darwin") {
       const tmpfile = path.join(tmpdir(), "opencode-clipboard.png")
       try {
@@ -43,6 +55,8 @@ export namespace Clipboard {
       }
     }
 
+    // Windows/WSL: Invoke PowerShell to extract image data directly to a
+    // Base64 string via System.Windows.Forms.
     if (os === "win32" || release().includes("WSL")) {
       const script =
         "Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [System.Convert]::ToBase64String($ms.ToArray()) }"
@@ -55,6 +69,7 @@ export namespace Clipboard {
       }
     }
 
+    // Linux: Try Wayland (wl-paste) first, then fall back to X11 (xclip).
     if (os === "linux") {
       const wayland = await $`wl-paste -t image/png`.nothrow().arrayBuffer()
       if (wayland && wayland.byteLength > 0) {
@@ -66,15 +81,21 @@ export namespace Clipboard {
       }
     }
 
+    // Final fallback: Read plain text using clipboardy.
     const text = await clipboardy.read().catch(() => {})
     if (text) {
       return { data: text, mime: "text/plain" }
     }
   }
 
+  /**
+   * Lazily determines the best available method for writing text to
+   * the system clipboard based on the environment and available binaries.
+   */
   const getCopyMethod = lazy(() => {
     const os = platform()
 
+    // macOS: Use AppleScript for native integration.
     if (os === "darwin" && Bun.which("osascript")) {
       console.log("clipboard: using osascript")
       return async (text: string) => {
@@ -83,6 +104,7 @@ export namespace Clipboard {
       }
     }
 
+    // Linux: Check for wl-copy (Wayland) then fall back to xclip/xsel (X11).
     if (os === "linux") {
       if (process.env["WAYLAND_DISPLAY"] && Bun.which("wl-copy")) {
         console.log("clipboard: using wl-copy")
@@ -121,6 +143,8 @@ export namespace Clipboard {
       }
     }
 
+    // Windows: Use PowerShell to pipe stdin to Set-Clipboard.
+    // Piped input avoids complex shell escaping and interpolation issues.
     if (os === "win32") {
       console.log("clipboard: using powershell")
       return async (text: string) => {
@@ -152,6 +176,12 @@ export namespace Clipboard {
     }
   })
 
+  /**
+   * Main entry point for copying text.
+   * Performs a dual-write:
+   * 1. OSC 52 escape sequence (for remote/SSH support).
+   * 2. Platform-specific native copy (for local clipboard).
+   */
   export async function copy(text: string): Promise<void> {
     writeOsc52(text)
     await getCopyMethod()(text)
