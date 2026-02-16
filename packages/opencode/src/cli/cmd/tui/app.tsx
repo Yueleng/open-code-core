@@ -1,3 +1,22 @@
+/**
+ * app.tsx — Main entry point for OpenCode's TUI (Terminal User Interface).
+ *
+ * This file is the "shell" of the entire TUI. It:
+ *   1. Detects the terminal environment (dark/light mode, Win32 quirks)
+ *   2. Bootstraps a deep SolidJS provider tree that wires up SDK, sync,
+ *      theming, routing, dialogs, keybinds, and more
+ *   3. Registers the full command palette with ~25+ commands
+ *   4. Handles CLI args (--agent, --model, --session, --continue, --fork)
+ *   5. Listens for server-sent events (session deletion, errors, updates)
+ *   6. Routes between Home and Session views
+ *   7. Provides a crash recovery screen (ErrorComponent) as a last resort
+ *
+ * The file has four main pieces:
+ *   - getTerminalBackgroundColor() — utility to auto-detect dark/light terminal
+ *   - tui()                        — exported bootstrap function
+ *   - App()                        — root application component
+ *   - ErrorComponent()             — crash screen fallback
+ */
 import { render, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { Clipboard } from "@tui/util/clipboard"
 import { Selection } from "@tui/util/selection"
@@ -39,6 +58,22 @@ import open from "open"
 import { writeHeapSnapshot } from "v8"
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
 
+/**
+ * Auto-detects whether the terminal has a dark or light background.
+ *
+ * How it works:
+ *   1. Sends the ANSI escape sequence `\x1b]11;?\x07` to stdout, which asks
+ *      the terminal to report its background color.
+ *   2. Listens on stdin for the terminal's response, parsing it from one of
+ *      three formats: `rgb:RR/GG/BB`, `#RRGGBB`, or `rgb(R,G,B)`.
+ *   3. Computes luminance using the standard formula:
+ *      (0.299*R + 0.587*G + 0.114*B) / 255
+ *   4. Returns "light" if luminance > 0.5, otherwise "dark".
+ *   5. If the terminal doesn't respond within 1 second, defaults to "dark".
+ *
+ * The result is later passed to ThemeProvider to initialize the correct
+ * color scheme.
+ */
 async function getTerminalBackgroundColor(): Promise<"dark" | "light"> {
   // can't set raw mode if not a TTY
   if (!process.stdin.isTTY) return "dark"
@@ -101,6 +136,26 @@ async function getTerminalBackgroundColor(): Promise<"dark" | "light"> {
 
 import type { EventSource } from "./context/sdk"
 
+/**
+ * Main export — the bootstrap function that callers invoke to start the TUI.
+ *
+ * @param input.url        - Backend/SDK server URL
+ * @param input.args       - CLI arguments (agent, model, session, etc.)
+ * @param input.directory  - Working directory (optional)
+ * @param input.fetch      - Custom fetch implementation (optional)
+ * @param input.headers    - Custom HTTP headers (optional)
+ * @param input.events     - Custom EventSource for SSE (optional)
+ * @param input.onExit     - Cleanup callback when the app exits (optional)
+ *
+ * Returns a Promise<void> that keeps the process alive until the TUI exits.
+ *
+ * Steps:
+ *   1. Installs Win32 terminal guards (Ctrl+C guard, disable processed input)
+ *   2. Detects terminal background color (dark/light)
+ *   3. Defines the onExit handler (unguard Win32 → call user's onExit → resolve)
+ *   4. Calls render() — the @opentui/solid equivalent of React's createRoot().render()
+ *      with a deeply nested provider tree and the <App /> component at the center.
+ */
 export function tui(input: {
   url: string
   args: Args
@@ -127,6 +182,34 @@ export function tui(input: {
       resolve()
     }
 
+    // Render the SolidJS component tree into the terminal.
+    // The deeply nested provider tree follows the SolidJS context pattern
+    // (similar to React's Context API). From outermost to innermost:
+    //
+    //   ErrorBoundary       → Catches uncaught errors, shows ErrorComponent
+    //     ArgsProvider      → CLI args context
+    //       ExitProvider    → Exit callback context
+    //         KVProvider    → Key-value persistent storage
+    //           ToastProvider   → Toast notification system
+    //             RouteProvider     → Client-side routing (home vs session)
+    //               SDKProvider     → Backend SDK/API client
+    //                 SyncProvider  → Real-time data synchronization
+    //                   ThemeProvider    → Theming (dark/light, colors)
+    //                     LocalProvider     → Local state (selected model, agent)
+    //                       KeybindProvider     → Keyboard shortcut bindings
+    //                         PromptStashProvider  → Stashed prompts
+    //                           DialogProvider     → Modal dialog system
+    //                             CommandProvider   → Command palette
+    //                               FrecencyProvider    → Frecency-based sorting
+    //                                 PromptHistoryProvider → Prompt history
+    //                                   PromptRefProvider    → Prompt ref access
+    //                                     <App />            → The actual app
+    //
+    // Render options:
+    //   - 60 FPS target
+    //   - Ctrl+C doesn't exit (handled manually)
+    //   - Kitty keyboard protocol enabled
+    //   - Copy-to-clipboard support via the console
     render(
       () => {
         return (
@@ -195,6 +278,21 @@ export function tui(input: {
   })
 }
 
+/**
+ * Root application component — where all the app logic lives.
+ *
+ * Responsibilities:
+ *   - Pulls in all contexts (route, dialog, local, kv, command, sdk, etc.)
+ *   - Handles text selection and copy-to-clipboard behavior
+ *   - Manages terminal window title reactively
+ *   - Processes CLI arguments on mount (--agent, --model, --session)
+ *   - Handles --continue and --fork flags
+ *   - Shows provider setup dialog if no providers are configured
+ *   - Registers the full command palette (~25+ commands)
+ *   - Shows an OpenRouter quality warning (one-time)
+ *   - Subscribes to SDK events (command execute, toast, session select/delete, errors, updates)
+ *   - Renders the main view: <Home /> or <Session /> based on route
+ */
 function App() {
   const route = useRoute()
   const dimensions = useTerminalDimensions()
@@ -211,6 +309,11 @@ function App() {
   const exit = useExit()
   const promptRef = usePromptRef()
 
+  // --- Selection / Copy Handling ---
+  // Implements Windows Terminal-like text selection behavior:
+  //   - Ctrl+C with an active selection → copies text and clears the selection
+  //   - Escape → dismisses the selection without copying
+  //   - Any other key → dismisses the selection and passes the input through
   useKeyboard((evt) => {
     if (!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT) return
     if (!renderer.getSelection()) return
@@ -240,7 +343,8 @@ function App() {
     renderer.clearSelection()
   })
 
-  // Wire up console copy-to-clipboard via opentui's onCopySelection callback
+  // Wire up console copy-to-clipboard via opentui's onCopySelection callback.
+  // Copies selected text to system clipboard and shows a toast notification.
   renderer.console.onCopySelection = async (text: string) => {
     if (!text || text.length === 0) return
 
@@ -250,6 +354,12 @@ function App() {
 
     renderer.clearSelection()
   }
+  // --- Terminal Title ---
+  // Reactively sets the terminal window title based on the current route:
+  //   - Home route         → "OpenCode"
+  //   - Session route      → "OC | <session title>" (truncated to 40 chars)
+  //   - Default/untitled   → "OpenCode"
+  // Can be toggled off by the user via a command palette option.
   const [terminalTitleEnabled, setTerminalTitleEnabled] = createSignal(kv.get("terminal_title_enabled", true))
 
   createEffect(() => {
@@ -278,6 +388,11 @@ function App() {
     }
   })
 
+  // --- Initial CLI Args Handling ---
+  // On mount, processes CLI arguments:
+  //   --agent    → sets the active agent
+  //   --model    → parses "providerID/modelID" and sets the active model
+  //   --session  → (without --fork) navigates directly to that session
   const args = useArgs()
   onMount(() => {
     batch(() => {
@@ -302,6 +417,10 @@ function App() {
     })
   })
 
+  // --- --continue (-c) Flag ---
+  // When -c is passed, finds the most recently updated root session (no parent)
+  // and navigates to it. If --fork is also set, it forks that session first.
+  // Session list is loaded in the blocking phase, so we can navigate at "partial".
   let continued = false
   createEffect(() => {
     // When using -c, session list is loaded in blocking phase, so we can navigate at "partial"
@@ -325,9 +444,10 @@ function App() {
     }
   })
 
-  // Handle --session with --fork: wait for sync to be fully complete before forking
-  // (session list loads in non-blocking phase for --session, so we must wait for "complete"
-  // to avoid a race where reconcile overwrites the newly forked session)
+  // --- --session with --fork ---
+  // A separate effect that waits for sync to be fully complete ("complete" status)
+  // before forking a session by ID. This avoids race conditions where the
+  // reconciliation step could overwrite the newly forked session.
   let forked = false
   createEffect(() => {
     if (forked || sync.status !== "complete" || !args.sessionID || !args.fork) return
@@ -341,6 +461,9 @@ function App() {
     })
   })
 
+  // --- Empty Provider Check ---
+  // If the app finishes syncing and discovers no providers are configured,
+  // it automatically pops up the DialogProviderList to prompt the user to connect one.
   createEffect(
     on(
       () => sync.status === "complete" && sync.data.provider.length === 0,
@@ -352,6 +475,19 @@ function App() {
     ),
   )
 
+  // --- Command Palette Registration ---
+  // Registers all available commands for the command palette.
+  // Each command has a title, value (identifier), optional keybind,
+  // optional slash command (for /command in the prompt), category, and onSelect handler.
+  //
+  // Categories and commands:
+  //   Session  — Switch session, New session
+  //   Agent    — Switch model, Model cycle (fwd/rev), Favorite cycle (fwd/rev),
+  //              Switch agent, Toggle MCPs, Agent cycle, Variant cycle
+  //   Provider — Connect provider
+  //   System   — View status, Switch theme, Toggle appearance, Help, Open docs,
+  //              Exit, Toggle debug, Toggle console, Heap snapshot, Suspend terminal,
+  //              Toggle terminal title, Toggle animations, Toggle diff wrapping
   const connected = useConnected()
   command.register(() => [
     {
@@ -654,6 +790,9 @@ function App() {
     },
   ])
 
+  // --- OpenRouter Warning ---
+  // If the user selects an OpenRouter model, shows a one-time warning that
+  // OpenRouter may route requests to subpar providers, recommending OpenCode Zen.
   createEffect(() => {
     const currentModel = local.model.current()
     if (!currentModel) return
@@ -668,6 +807,14 @@ function App() {
     }
   })
 
+  // --- SDK Event Listeners ---
+  // Subscribes to server-sent events from the SDK:
+  //   CommandExecute    → triggers a command programmatically
+  //   ToastShow         → shows a toast notification
+  //   SessionSelect     → navigates to a specific session
+  //   Session.Deleted   → if current session is deleted, navigates home
+  //   Session.Error     → shows error toasts (ignoring MessageAbortedError)
+  //   UpdateAvailable   → notifies user of a new OpenCode version
   sdk.event.on(TuiEvent.CommandExecute.type, (evt) => {
     command.trigger(evt.properties.command)
   })
@@ -729,6 +876,11 @@ function App() {
     })
   })
 
+  // --- Render ---
+  // The actual JSX output: a full-terminal-size <box> with the theme background,
+  // containing a <Switch> that renders either <Home /> or <Session /> based on route.
+  // Also handles right-click copy and mouse-up copy-on-select depending on
+  // the OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT flag.
   return (
     <box
       width={dimensions().width}
@@ -756,6 +908,19 @@ function App() {
   )
 }
 
+/**
+ * Crash recovery screen — shown when an uncaught error bubbles past the ErrorBoundary.
+ *
+ * Features:
+ *   - Displays the error message and full stack trace in a scrollable area
+ *   - "Copy issue URL" button that constructs a pre-filled GitHub issue URL
+ *     with the stack trace and OpenCode version
+ *   - "Reset TUI" button to retry (calls the ErrorBoundary's reset)
+ *   - "Exit" button to cleanly shut down
+ *   - Ctrl+C also exits
+ *   - Uses hardcoded fallback colors (not the theme) since the ThemeProvider
+ *     context may not be available during a crash
+ */
 function ErrorComponent(props: {
   error: Error
   reset: () => void
